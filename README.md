@@ -1,36 +1,77 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🎬 IMDb RAG AI Chatbot (BYOK Edition)
 
-## Getting Started
+A highly optimized, production-ready Retrieval-Augmented Generation (RAG) chatbot designed to scrape and query custom IMDb lists (e.g., world-class singers, movies, etc.) using a localized architecture. Built with **Next.js (App Router)**, **Tailwind CSS**, and **Vercel AI SDK**.
 
-First, run the development server:
+This application implements the **Bring Your Own Key (BYOK)** architecture to keep production usage 100% free and secure for hosts, shifting the API cost securely to the client's local environment.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+---
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## ✨ Features
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- **🌐 Live Web Scraper (`scraper.mjs`)**: Bypasses bot detection using custom headers and retrieves unstructured data from designated IMDb lists.
+- **⚡ Local Search Index (BM25-lite)**: Fast, free keyword-based matching. It parses the scraped data, splits it into semantic chunks, and creates a local search index—meaning **$0 RAG database costs**!
+- **🔑 Bring Your Own Key (BYOK)**: User's OpenAI API Key is securely stored on their own browser (`localStorage`) and never hits a database.
+- **🎨 Premium User Interface**: A modern dark-themed interface with smooth micro-animations, glassmorphism, responsive elements, and optimized avatar scaling.
+- **🤖 Serverless Processing**: Runs AI generation securely using `gpt-4o-mini` over serverless functions.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+---
 
-## Learn More
+## 🛠️ Tech Stack
 
-To learn more about Next.js, take a look at the following resources:
+- **Framework**: Next.js 15 (App Router)
+- **Styling**: Tailwind CSS
+- **AI Integration**: Vercel AI SDK (`ai` and `@ai-sdk/openai`)
+- **Scraper**: Cheerio
+- **Database/Storage**: Static JSON File (`rag-data.json`)
+- **Deployment**: Vercel / Netlify
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+---
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## 🚀 Getting Started
 
-## Deploy on Vercel
+### Prerequisites
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- [Node.js](https://nodejs.org/) (v18+)
+- An OpenAI API Key (input directly into the live website)
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### Installation & Scraper Setup
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/yashraj4/imdb-rag-chatbot.git
+   cd imdb-rag-chatbot
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   npm install
+   ```
+
+3. **Run the IMDb Scraper:**
+   Extract and compile the latest list data into your local vector-less index:
+   ```bash
+   node scraper.mjs
+   ```
+
+4. **Start the local development server:**
+   ```bash
+   npm run dev
+   ```
+   Open [http://localhost:3000](http://localhost:3000) in your browser!
+
+---
+
+## 📦 Production Deployment
+
+Because this app utilizes the **BYOK model**, deploying is completely plug-and-play:
+
+1. **Push to GitHub** (if not already done).
+2. Go to **[Vercel](https://vercel.com/)** or **[Netlify](https://netlify.com/)**.
+3. Import the repository.
+4. Hit **Deploy**! No environment variables (`OPENAI_API_KEY`) are required on the server side because users input their own key in the UI.
+
+---
+
+## 🔒 Security
+
+We value privacy. The OpenAI API Key provided by users in the UI is stored purely in the browser's `localStorage` and sent over an encrypted HTTPS connection directly to the serverless function endpoint to stream responses, ensuring complete privacy and security.
