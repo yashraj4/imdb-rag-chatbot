@@ -2,11 +2,7 @@ import { NextResponse } from 'next/server';
 import * as cheerio from 'cheerio';
 import fs from 'fs';
 import path from 'path';
-import { Pinecone } from '@pinecone-database/pinecone';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { embedMany } from 'ai';
 import { RecursiveCharacterTextSplitter } from '@/lib/splitter';
-import { config, validateEnvironment } from '@/lib/config';
 
 interface ScrapedChunk {
   id: string;
@@ -15,160 +11,106 @@ interface ScrapedChunk {
   words: string[];
 }
 
-const urlsToScrape: string[] = [
+const urlsToScrape = [
   'https://www.imdb.com/list/ls023470650/',
-  'https://www.imdb.com/list/ls002987241/'
+  'https://www.imdb.com/list/ls002987241/',
 ];
 
-// Instantiating semantic Recursive Text Splitter
 const splitter = new RecursiveCharacterTextSplitter({
   chunkSize: 1000,
-  chunkOverlap: 200
+  chunkOverlap: 200,
 });
 
-async function scrapeText(url: string): Promise<string> {
-  const startTime = performance.now();
+function isBlockedPage(text: string): boolean {
+  const normalizedText = text.toLowerCase();
+  return (
+    normalizedText.includes('javascript is disabled') ||
+    normalizedText.includes("verify that you're not a robot") ||
+    normalizedText.includes('verify that you are not a robot')
+  );
+}
+
+function toWords(text: string): string[] {
+  return Array.from(new Set(text.toLowerCase().match(/\w+/g) || []));
+}
+
+async function fetchText(url: string): Promise<string> {
   const res = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.5'
-    }
+      Accept: 'text/html,text/csv,text/plain,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
   });
-  
+
   if (!res.ok) {
-    throw new Error(`Failed to fetch ${url}: ${res.statusText}`);
+    throw new Error(`HTTP ${res.status} ${res.statusText}`);
   }
 
-  const html = await res.text();
+  return res.text();
+}
+
+async function scrapeImdbList(url: string): Promise<string> {
+  const html = await fetchText(url);
   const $ = cheerio.load(html);
-  
-  // Remove non-content structural elements
+
   $('script, style, nav, footer, header').remove();
-  
-  let text = '';
+
   const listItems = $('.lister-item, .ipc-metadata-list-summary-item');
-  
-  if (listItems.length > 0) {
-    listItems.each((_, el) => {
-      text += $(el).text().replace(/\s+/g, ' ').trim() + '\n\n';
-    });
-  } else {
-    text = $('body').text().replace(/\s+/g, ' ').trim();
+  const text = listItems.length > 0
+    ? listItems
+      .map((_, el) => $(el).text().replace(/\s+/g, ' ').trim())
+      .get()
+      .filter(Boolean)
+      .join('\n\n')
+    : $('body').text().replace(/\s+/g, ' ').trim();
+
+  if (!text || isBlockedPage(text)) {
+    throw new Error('IMDb returned a bot/JavaScript verification page instead of list content');
   }
 
-  const duration = (performance.now() - startTime).toFixed(2);
-  console.info(`[Scraper] Scraped ${url} successfully in ${duration}ms`);
   return text;
 }
 
-export async function POST(req: Request): Promise<Response> {
-  const pipelineStartTime = performance.now();
-  try {
+export async function POST(): Promise<Response> {
+  const startedAt = performance.now();
+  const allChunks: ScrapedChunk[] = [];
+  const failures: Array<{ url: string; error: string }> = [];
 
+  for (const url of urlsToScrape) {
+    try {
+      const text = await scrapeImdbList(url);
+      const chunks = splitter.splitText(text);
 
-    console.info('[Data Pipeline] Starting ingestion and semantic parsing...');
-    const allChunks: ScrapedChunk[] = [];
+      for (const chunk of chunks) {
+        const cleanText = chunk.trim();
+        if (cleanText.length <= 50) continue;
 
-    // 1. Scraping Step
-    for (const url of urlsToScrape) {
-      try {
-        const text = await scrapeText(url);
-        const chunks = splitter.splitText(text);
-        
-        for (const chunk of chunks) {
-          if (chunk.length > 50) {
-            const cleanText = chunk.trim();
-            allChunks.push({
-              id: `${Buffer.from(url).toString('base64').slice(0, 15)}-${Math.random().toString(36).substring(2, 7)}`,
-              url,
-              text: cleanText,
-              words: Array.from(new Set(cleanText.toLowerCase().match(/\w+/g) || []))
-            });
-          }
-        }
-      } catch (err: unknown) {
-        const errorMessage = err instanceof Error ? err.message : String(err);
-        console.error(`[Scraper Error] Failed to scrape ${url}:`, errorMessage);
+        allChunks.push({
+          id: `${Buffer.from(url).toString('base64url').slice(0, 15)}-${allChunks.length + 1}`,
+          url,
+          text: cleanText,
+          words: toWords(cleanText),
+        });
       }
-    }
-
-    const { hasGemini, hasPinecone } = validateEnvironment();
-    let vectorDbStatus = 'Skipped (Keys not configured)';
-    let localFileStatus = 'Saved successfully';
-
-    // 2. Vector DB Ingestion (Pinecone + Gemini Embeddings)
-    if (hasGemini && hasPinecone && config.pineconeApiKey && config.pineconeIndex) {
-      const dbStartTime = performance.now();
-      console.info('[Data Pipeline] Processing high-dimensional embeddings...');
-      
-      const pinecone = new Pinecone({
-        apiKey: config.pineconeApiKey
+    } catch (error: unknown) {
+      failures.push({
+        url,
+        error: error instanceof Error ? error.message : String(error),
       });
-      const index = pinecone.Index(config.pineconeIndex);
-
-      const textsToEmbed = allChunks.map(c => c.text);
-      const googleProvider = createGoogleGenerativeAI({ apiKey: config.geminiApiKey || '' });
-      
-      // Generating embeddings with Google's text-embedding-004
-      const { embeddings } = await embedMany({
-        model: googleProvider.embedding('text-embedding-004'),
-        values: textsToEmbed,
-      });
-
-      // Mapping chunk records to Pinecone format
-      const vectors = allChunks.map((chunk, idx) => ({
-        id: chunk.id,
-        values: embeddings[idx],
-        metadata: {
-          url: chunk.url,
-          text: chunk.text
-        }
-      }));
-
-      // Ingesting in batch arrays of 100 to prevent API timeouts
-      const batchSize = 100;
-      for (let i = 0; i < vectors.length; i += batchSize) {
-        const batch = vectors.slice(i, i + batchSize);
-        await index.upsert(batch as any);
-      }
-      
-      const dbDuration = (performance.now() - dbStartTime).toFixed(2);
-      vectorDbStatus = `Ingested ${vectors.length} vectors in ${dbDuration}ms`;
-      console.info(`[Vector Ingestion] Successful: ${vectorDbStatus}`);
     }
-
-    // 3. Local Sync JSON Backup (Enables local dev fallback)
-    const dataDir = path.join(process.cwd(), 'src');
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
-    fs.writeFileSync(
-      path.join(dataDir, 'rag-data.json'), 
-      JSON.stringify(allChunks, null, 2)
-    );
-
-    const totalPipelineDuration = (performance.now() - pipelineStartTime).toFixed(2);
-    console.info(`[Data Pipeline] Completed in ${totalPipelineDuration}ms`);
-
-    return NextResponse.json({
-      success: true,
-      message: 'Ingestion pipeline executed successfully',
-      chunksIndexed: allChunks.length,
-      pipelineExecution: {
-        scraping: 'Completed (Cheerio)',
-        localIndex: localFileStatus,
-        cloudVectorDB: vectorDbStatus,
-        totalDurationMs: parseFloat(totalPipelineDuration)
-      }
-    });
-
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error('[Pipeline Panic] Ingestion crashed:', errorMessage);
-    return NextResponse.json(
-      { success: false, error: errorMessage }, 
-      { status: 500 }
-    );
   }
+
+  const outputPath = path.join(process.cwd(), 'src', 'rag-data.json');
+  fs.writeFileSync(outputPath, JSON.stringify(allChunks, null, 2));
+
+  return NextResponse.json({
+    success: allChunks.length > 0,
+    mode: 'local-rag-no-api-keys',
+    sources: urlsToScrape,
+    chunksIndexed: allChunks.length,
+    failures,
+    outputPath,
+    totalDurationMs: Number((performance.now() - startedAt).toFixed(2)),
+  });
 }

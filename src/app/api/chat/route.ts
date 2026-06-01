@@ -1,192 +1,143 @@
-import { streamText, embed, ModelMessage } from 'ai';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { Pinecone } from '@pinecone-database/pinecone';
-import { config, validateEnvironment } from '@/lib/config';
-import ragDataFallback from '@/rag-data.json';
-
 interface ChatRequestBody {
   messages: any[];
 }
 
-interface FallbackChunk {
-  url: string;
-  text: string;
-  words?: string[];
+interface OpenRouterMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
 }
 
 export const maxDuration = 30;
 
+const openRouterApiUrl = 'https://openrouter.ai/api/v1/chat/completions';
+const defaultModel = 'openai/gpt-4o-mini';
+
+function extractMessageText(message: any): string {
+  if (typeof message.content === 'string') {
+    return message.content;
+  }
+
+  if (Array.isArray(message.content)) {
+    return message.content
+      .filter((part: any) => part?.type === 'text')
+      .map((part: any) => part.text || '')
+      .join('\n');
+  }
+
+  if (Array.isArray(message.parts)) {
+    return message.parts
+      .filter((part: any) => part?.type === 'text')
+      .map((part: any) => part.text || '')
+      .join('\n');
+  }
+
+  return '';
+}
+
+function toOpenRouterMessages(messages: any[]): OpenRouterMessage[] {
+  return messages
+    .map((message) => ({
+      role: message.role as 'user' | 'assistant',
+      content: extractMessageText(message),
+    }))
+    .filter((message) => (
+      (message.role === 'user' || message.role === 'assistant') &&
+      message.content.trim().length > 0
+    ));
+}
+
+function createUIMessageStreamResponse(answer: string): Response {
+  const responseBody = [
+    'data: {"type":"start"}',
+    '',
+    'data: {"type":"start-step"}',
+    '',
+    'data: {"type":"text-start","id":"0"}',
+    '',
+    `data: {"type":"text-delta","id":"0","delta":${JSON.stringify(answer)}}`,
+    '',
+    'data: {"type":"text-end","id":"0"}',
+    '',
+    'data: {"type":"finish-step"}',
+    '',
+    'data: {"type":"finish","finishReason":"stop"}',
+    '',
+    'data: [DONE]',
+    '',
+  ].join('\n');
+
+  return new Response(responseBody, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    },
+  });
+}
+
+async function askOpenRouter(messages: OpenRouterMessage[]): Promise<string> {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+
+  if (!apiKey) {
+    throw new Error('OPENROUTER_API_KEY is missing in .env.local');
+  }
+
+  const response = await fetch(openRouterApiUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': process.env.OPENROUTER_SITE_URL || 'http://localhost:3000',
+      'X-Title': process.env.OPENROUTER_APP_NAME || 'RAG Scrap Chat',
+    },
+    body: JSON.stringify({
+      model: process.env.OPENROUTER_MODEL || defaultModel,
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a helpful assistant. Answer directly in plain text. Do not use Markdown bold.',
+        },
+        ...messages,
+      ],
+      temperature: 0.4,
+    }),
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    const message = data?.error?.message || data?.message || response.statusText;
+    throw new Error(`OpenRouter error ${response.status}: ${message}`);
+  }
+
+  const answer = data?.choices?.[0]?.message?.content;
+  if (typeof answer !== 'string' || answer.trim().length === 0) {
+    throw new Error('OpenRouter returned an empty answer');
+  }
+
+  return answer.trim();
+}
+
 export async function POST(req: Request): Promise<Response> {
-  const requestStartTime = performance.now();
   try {
     const body: ChatRequestBody = await req.json();
     const { messages } = body;
-    
+
     if (!messages || messages.length === 0) {
       return new Response(
-        JSON.stringify({ error: 'Messages payload is missing or empty' }), 
+        JSON.stringify({ error: 'Messages payload is missing or empty' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       );
     }
 
-    // Format all incoming messages to strictly match ModelMessage[] expected by AI SDK
-    const formattedMessages: ModelMessage[] = messages.map(m => {
-      let text = '';
-      if (typeof m.content === 'string') {
-        text = m.content;
-      } else if (Array.isArray(m.content)) {
-        text = m.content
-          .filter((part: any) => part.type === 'text')
-          .map((part: any) => part.text || '')
-          .join('\n');
-      } else if (m.parts && Array.isArray(m.parts)) {
-        text = m.parts
-          .filter((part: any) => part.type === 'text')
-          .map((part: any) => part.text || '')
-          .join('\n');
-      }
-      return {
-        role: m.role as 'user' | 'assistant',
-        content: text
-      };
-    });
+    const openRouterMessages = toOpenRouterMessages(messages);
+    const answer = await askOpenRouter(openRouterMessages);
 
-    const lastMessage = (formattedMessages[formattedMessages.length - 1]?.content as string) || '';
-    const { hasGemini, hasPinecone } = validateEnvironment();
-
-    let retrievedContext = '';
-    let dbMatchCount = 0;
-
-    // 2. DUAL-MODE SEMANTIC VECTOR RETRIEVAL (Gemini + Pinecone fallback)
-    if (hasGemini && hasPinecone && config.pineconeApiKey && config.pineconeIndex) {
-      const dbStartTime = performance.now();
-      try {
-        console.info('[Chat API] Performing Semantic Vector Search via Pinecone Cloud DB...');
-        const pinecone = new Pinecone({ apiKey: config.pineconeApiKey });
-        const index = pinecone.Index(config.pineconeIndex);
-
-        const googleProvider = createGoogleGenerativeAI({ apiKey: config.geminiApiKey || '' });
-        
-        // Generate dynamic prompt embedding
-        const { embedding } = await embed({
-          model: googleProvider.embedding('text-embedding-004'),
-          value: lastMessage,
-        });
-
-        // Search nearest neighbor records
-        const queryResponse = await index.query({
-          vector: embedding,
-          topK: 5,
-          includeMetadata: true
-        });
-
-        if (queryResponse.matches) {
-          retrievedContext = queryResponse.matches
-            .filter(match => match.metadata && match.score && match.score > 0.4)
-            .map(match => {
-              const metadata = match.metadata as { url: string; text: string };
-              dbMatchCount++;
-              return `Source: ${metadata.url}\n${metadata.text}`;
-            })
-            .join('\n\n');
-        }
-
-        const dbDuration = (performance.now() - dbStartTime).toFixed(2);
-        console.info(`[Vector Retrieval] Success: Found ${dbMatchCount} matches in ${dbDuration}ms`);
-
-      } catch (err: unknown) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        console.error('[Vector Retrieval Failed] Routing to local keyword fallback:', errorMsg);
-      }
-    }
-
-    // Local Search Fallback (if Pinecone is missing/fails or off-grid)
-    if (!retrievedContext) {
-      const localStartTime = performance.now();
-      console.info('[Chat API] Running local keyword-based indexing search...');
-      const queryWords = lastMessage.toLowerCase().match(/\w+/g) || [];
-      
-      const typedFallbackData = ragDataFallback as FallbackChunk[];
-      
-      const scoredChunks = typedFallbackData.map((chunk) => {
-        let score = 0;
-        if (chunk.words) {
-          for (const word of queryWords) {
-            if (chunk.words.includes(word)) {
-              score++;
-            }
-          }
-        }
-        return { ...chunk, score };
-      })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 5);
-
-      retrievedContext = scoredChunks
-        .filter((c) => c.score > 0)
-        .map((c) => `Source: ${c.url}\n${c.text}`)
-        .join('\n\n');
-
-      const localDuration = (performance.now() - localStartTime).toFixed(2);
-      console.info(`[Local Retrieval] Success: Context prepared in ${localDuration}ms`);
-    }
-
-    // 3. CONTEXT-AWARE SYSTEM PROMPT INJECTION
-    const systemPrompt = `You are a helpful, friendly, and expert AI assistant. Use the following context from IMDb to answer the user's question accurately. 
-
-If the context contains the answer, answer it clearly and mention the source links where appropriate.
-If the context doesn't contain the answer, say "Based on the scraped IMDb data in my index, I couldn't find that specific information" and then provide your best helpful general response.
-
-IMDb Context:
-${retrievedContext || 'No IMDb list information available.'}`;
-
-    // 4. DUAL-MODE GENERATION ROUTER (Gemini vs Custom local simulated stream)
-    if (hasGemini) {
-      console.info('[Chat Generation] Request routed to Cloud Google Gemini-1.5-Flash');
-      const googleProvider = createGoogleGenerativeAI({ apiKey: config.geminiApiKey || '' });
-      const result = streamText({
-        model: googleProvider('gemini-1.5-flash'),
-        messages: [
-          { role: 'system', content: systemPrompt },
-          ...formattedMessages,
-        ],
-        onFinish: () => {
-          const totalDuration = (performance.now() - requestStartTime).toFixed(2);
-          console.info(`[Chat API Complete] Gemini streaming finished. Total Latency: ${totalDuration}ms`);
-        }
-      });
-      return result.toTextStreamResponse();
-    } else {
-      console.info('[Chat Generation] Routing to Local Simulated Streaming (Offline Developer Mode)...');
-      
-      // Generate highly realistic response using local fetched RAG context
-      let mockAnswer = '';
-      if (retrievedContext) {
-        mockAnswer = `[Offline Local RAG Search]\n\nBased on the local scraped IMDb lists, here is the relevant context I fetched for you:\n\n${retrievedContext}\n\n*(Note: To activate real Google Gemini 1.5 Flash generation, please add GEMINI_API_KEY to your env settings).*`;
-      } else {
-        mockAnswer = `[Offline Local RAG Search]\n\nI couldn't find any close matches in the local IMDb scraped data for your question: "${lastMessage}".\n\n*(Note: To activate real Google Gemini 1.5 Flash generation, please add GEMINI_API_KEY to your env settings).*`;
-      }
-
-      let responseBody = '';
-      const words = mockAnswer.split(' ');
-      for (const word of words) {
-        responseBody += `0:${JSON.stringify(word + ' ')}\n`;
-      }
-
-      return new Response(responseBody, {
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'x-vercel-ai-data-stream': 'v1'
-        }
-      });
-    }
-
+    console.info('[Chat Generation] Request routed to OpenRouter.');
+    return createUIMessageStreamResponse(answer);
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    console.error('[Chat Engine Panic] API Error:', errorMsg);
-    return new Response(
-      JSON.stringify({ error: errorMsg }), 
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
-    );
+    console.error('[OpenRouter Chat] API Error:', errorMsg);
+    return createUIMessageStreamResponse(`OpenRouter setup issue: ${errorMsg}`);
   }
 }

@@ -6,6 +6,15 @@ const urlsToScrape = [
   'https://www.imdb.com/list/ls002987241/'
 ];
 
+function isBlockedPage(text) {
+  const normalizedText = text.toLowerCase();
+  return (
+    normalizedText.includes('javascript is disabled') ||
+    normalizedText.includes("verify that you're not a robot") ||
+    normalizedText.includes('verify that you are not a robot')
+  );
+}
+
 async function scrapeText(url) {
   console.log(`Fetching ${url}...`);
   const res = await fetch(url, {
@@ -31,6 +40,10 @@ async function scrapeText(url) {
   } else {
     // fallback
     text = $('body').text().replace(/\s+/g, ' ').trim();
+  }
+
+  if (isBlockedPage(text)) {
+    throw new Error('IMDb returned a bot/JavaScript verification page instead of list content');
   }
   
   return text;
