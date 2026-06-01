@@ -1,6 +1,5 @@
 import { streamText, embed, ModelMessage } from 'ai';
 import { google } from '@ai-sdk/google';
-import { createOllama } from 'ollama-ai-provider';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { config, validateEnvironment } from '@/lib/config';
 import ragDataFallback from '@/rag-data.json';
@@ -16,11 +15,6 @@ interface FallbackChunk {
 }
 
 export const maxDuration = 30;
-
-// Setup local Ollama fallback for local offline developer support
-const ollama = createOllama({
-  baseURL: 'http://127.0.0.1:11434/api',
-});
 
 export async function POST(req: Request): Promise<Response> {
   const requestStartTime = performance.now();
@@ -133,7 +127,7 @@ If the context doesn't contain the answer, say "Based on the scraped IMDb data i
 IMDb Context:
 ${retrievedContext || 'No IMDb list information available.'}`;
 
-    // 3. DUAL-MODE GENERATION ROUTER (Gemini vs local Ollama)
+    // 3. DUAL-MODE GENERATION ROUTER (Gemini vs Custom local simulated stream)
     if (hasGemini) {
       console.info('[Chat Generation] Request routed to Cloud Google Gemini-1.5-Flash');
       const result = streamText({
@@ -149,23 +143,35 @@ ${retrievedContext || 'No IMDb list information available.'}`;
       });
       return result.toTextStreamResponse();
     } else {
-      console.info('[Chat Generation] Request routed to Local Ollama Instance (llama3)');
+      console.info('[Chat Generation] Routing to Local Simulated Streaming (Offline Developer Mode)...');
       
-      // We safely cast the ollama model instance to prevent Next.js TS compiler warnings
-      const ollamaModel = ollama('llama3') as any;
-      
-      const result = streamText({
-        model: ollamaModel,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          ...messages,
-        ],
-        onFinish: () => {
-          const totalDuration = (performance.now() - requestStartTime).toFixed(2);
-          console.info(`[Chat API Complete] Local Ollama streaming finished. Total Latency: ${totalDuration}ms`);
+      // Generate highly realistic response using local fetched RAG context
+      let mockAnswer = '';
+      if (retrievedContext) {
+        mockAnswer = `[Offline Local RAG Search]\n\nBased on the local scraped IMDb lists, here is the relevant context I fetched for you:\n\n${retrievedContext}\n\n*(Note: To activate real Google Gemini 1.5 Flash generation, please add GEMINI_API_KEY to your env settings).*`;
+      } else {
+        mockAnswer = `[Offline Local RAG Search]\n\nI couldn't find any close matches in the local IMDb scraped data for your question: "${lastMessage}".\n\n*(Note: To activate real Google Gemini 1.5 Flash generation, please add GEMINI_API_KEY to your env settings).*`;
+      }
+
+      const encoder = new TextEncoder();
+      const customStream = new ReadableStream({
+        async start(controller) {
+          // Stream word by word to emulate active streaming response
+          const words = mockAnswer.split(' ');
+          for (const word of words) {
+            controller.enqueue(encoder.encode(word + ' '));
+            await new Promise(resolve => setTimeout(resolve, 30));
+          }
+          controller.close();
         }
       });
-      return result.toTextStreamResponse();
+
+      return new Response(customStream, {
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Transfer-Encoding': 'chunked'
+        }
+      });
     }
 
   } catch (error: unknown) {
