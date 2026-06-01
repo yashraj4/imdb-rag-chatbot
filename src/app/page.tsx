@@ -29,6 +29,34 @@ export default function Chat(): JSX.Element {
     }
   };
 
+  const renderMessageContent = (text: string) => {
+    if (!text) return null;
+
+    return text.split('\n').map((line, lineIdx) => {
+      // Check if the line is a list item (e.g., "1. " or "- ")
+      const isListItem = /^\d+\.\s+/.test(line.trim()) || /^[*-]\s+/.test(line.trim());
+
+      // Parse bold markdown "**text**"
+      const parts = line.split(/(\*\*.*?\*\*)/g);
+      const parsedElements = parts.map((part, partIdx) => {
+        if (part.startsWith('**') && part.endsWith('**')) {
+          return <strong key={partIdx} className="font-bold text-white">{part.slice(2, -2)}</strong>;
+        }
+        return part;
+      });
+
+      return (
+        <div
+          key={lineIdx}
+          className={`min-h-[1.5em] ${isListItem ? 'pl-6 -indent-6 mb-2 ml-2' : 'mb-1'} break-words`}
+          style={{ whiteSpace: 'pre-wrap' }}
+        >
+          {parsedElements}
+        </div>
+      );
+    });
+  };
+
   const getMessageText = (m: any): string => {
     if (!m.parts || !Array.isArray(m.parts)) return '';
     return m.parts
@@ -81,7 +109,7 @@ export default function Chat(): JSX.Element {
                     : 'bg-zinc-950 text-zinc-200 border border-zinc-800'
                 }`}
               >
-                {getMessageText(m)}
+                {renderMessageContent(getMessageText(m))}
               </div>
               {m.role === 'user' && (
                 <div className="w-8 h-8 rounded-full border border-zinc-800 flex items-center justify-center bg-zinc-900 shrink-0">
