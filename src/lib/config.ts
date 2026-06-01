@@ -2,10 +2,6 @@ export interface SystemConfig {
   geminiApiKey: string | undefined;
   pineconeApiKey: string | undefined;
   pineconeIndex: string | undefined;
-  ingestSecret: string | undefined;
-  ragflowApiKey: string | undefined;
-  ragflowChatId: string | undefined;
-  ragflowBaseUrl: string | undefined;
   isProduction: boolean;
 }
 
@@ -13,10 +9,6 @@ export const config: SystemConfig = {
   geminiApiKey: process.env.GEMINI_API_KEY,
   pineconeApiKey: process.env.PINECONE_API_KEY,
   pineconeIndex: process.env.PINECONE_INDEX,
-  ingestSecret: process.env.INGEST_SECRET,
-  ragflowApiKey: process.env.RAGFLOW_API_KEY,
-  ragflowChatId: process.env.RAGFLOW_CHAT_ID,
-  ragflowBaseUrl: process.env.RAGFLOW_BASE_URL || 'http://localhost:9380',
   isProduction: process.env.NODE_ENV === 'production',
 };
 
@@ -24,19 +16,11 @@ export const config: SystemConfig = {
  * Validates environment variables and logs clear engineering warnings
  * instead of letting silent runtime errors crash the application.
  */
-export function validateEnvironment(): { hasGemini: boolean; hasPinecone: boolean; hasRagflow: boolean } {
+export function validateEnvironment(): { hasGemini: boolean; hasPinecone: boolean } {
   const hasGemini = typeof config.geminiApiKey === 'string' && config.geminiApiKey.length > 0;
   const hasPinecone = 
     typeof config.pineconeApiKey === 'string' && config.pineconeApiKey.length > 0 &&
     typeof config.pineconeIndex === 'string' && config.pineconeIndex.length > 0;
-  const hasRagflow = 
-    typeof config.ragflowApiKey === 'string' && config.ragflowApiKey.length > 0 &&
-    typeof config.ragflowChatId === 'string' && config.ragflowChatId.length > 0;
-
-  if (hasRagflow) {
-    console.info(`ℹ️ Active RAGFlow integration detected. Requests will route to: ${config.ragflowBaseUrl}/api/v1/openai/${config.ragflowChatId}/chat/completions`);
-    return { hasGemini, hasPinecone, hasRagflow };
-  }
 
   if (config.isProduction) {
     if (!hasGemini) {
@@ -52,5 +36,5 @@ export function validateEnvironment(): { hasGemini: boolean; hasPinecone: boolea
     }
   }
 
-  return { hasGemini, hasPinecone, hasRagflow };
+  return { hasGemini, hasPinecone };
 }

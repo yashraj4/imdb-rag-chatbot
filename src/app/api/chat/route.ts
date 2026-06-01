@@ -5,7 +5,7 @@ import { config, validateEnvironment } from '@/lib/config';
 import ragDataFallback from '@/rag-data.json';
 
 interface ChatRequestBody {
-  messages: ModelMessage[];
+  messages: any[];
 }
 
 interface FallbackChunk {
@@ -29,83 +29,30 @@ export async function POST(req: Request): Promise<Response> {
       );
     }
 
-    const lastMessageObj = messages[messages.length - 1];
-    let lastMessage = '';
-    
-    if (typeof lastMessageObj.content === 'string') {
-      lastMessage = lastMessageObj.content;
-    } else if (Array.isArray(lastMessageObj.content)) {
-      lastMessage = lastMessageObj.content
-        .filter(part => part.type === 'text')
-        .map(part => (part as any).text || '')
-        .join(' ');
-    }
-
-    const { hasGemini, hasPinecone, hasRagflow } = validateEnvironment();
-
-    // 1. RAGFLOW ROUTING (IF CONFIGURED)
-    if (hasRagflow && config.ragflowApiKey && config.ragflowChatId) {
-      console.info('[Chat API] Routing query to RAGFlow Engine...');
-      const ragflowUrl = `${config.ragflowBaseUrl}/api/v1/openai/${config.ragflowChatId}/chat/completions`;
-      
-      const response = await fetch(ragflowUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${config.ragflowApiKey}`
-        },
-        body: JSON.stringify({
-          model: 'model',
-          messages: messages.map(m => ({
-            role: m.role,
-            content: m.content
-          })),
-          stream: true
-        })
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error('[RAGFlow Response Error]', errorText);
-        throw new Error(`RAGFlow API returned status ${response.status}: ${errorText}`);
+    // Format all incoming messages to strictly match ModelMessage[] expected by AI SDK
+    const formattedMessages: ModelMessage[] = messages.map(m => {
+      let text = '';
+      if (typeof m.content === 'string') {
+        text = m.content;
+      } else if (Array.isArray(m.content)) {
+        text = m.content
+          .filter((part: any) => part.type === 'text')
+          .map((part: any) => part.text || '')
+          .join('\n');
+      } else if (m.parts && Array.isArray(m.parts)) {
+        text = m.parts
+          .filter((part: any) => part.type === 'text')
+          .map((part: any) => part.text || '')
+          .join('\n');
       }
+      return {
+        role: m.role as 'user' | 'assistant',
+        content: text
+      };
+    });
 
-      // Convert RAGFlow standard OpenAI stream to Vercel AI SDK text protocol format
-      const encoder = new TextEncoder();
-      const decoder = new TextDecoder();
-      
-      const transformStream = new TransformStream({
-        transform(chunk, controller) {
-          const text = decoder.decode(chunk);
-          const lines = text.split('\n');
-          
-          for (const line of lines) {
-            const cleanLine = line.trim();
-            if (!cleanLine || cleanLine === 'data: [DONE]') continue;
-            
-            if (cleanLine.startsWith('data:')) {
-              try {
-                const jsonStr = cleanLine.slice(5).trim();
-                const data = JSON.parse(jsonStr);
-                const content = data.choices?.[0]?.delta?.content || '';
-                if (content) {
-                  controller.enqueue(encoder.encode(`0:${JSON.stringify(content)}\n`));
-                }
-              } catch (e) {
-                // Ignore malformed JSON lines
-              }
-            }
-          }
-        }
-      });
-
-      const responseStream = response.body?.pipeThrough(transformStream);
-      return new Response(responseStream, {
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-        }
-      });
-    }
+    const lastMessage = (formattedMessages[formattedMessages.length - 1]?.content as string) || '';
+    const { hasGemini, hasPinecone } = validateEnvironment();
 
     let retrievedContext = '';
     let dbMatchCount = 0;
@@ -198,7 +145,7 @@ ${retrievedContext || 'No IMDb list information available.'}`;
         model: google('gemini-1.5-flash'),
         messages: [
           { role: 'system', content: systemPrompt },
-          ...messages,
+          ...formattedMessages,
         ],
         onFinish: () => {
           const totalDuration = (performance.now() - requestStartTime).toFixed(2);

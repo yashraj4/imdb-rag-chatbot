@@ -65,14 +65,7 @@ async function scrapeText(url: string): Promise<string> {
 export async function POST(req: Request): Promise<Response> {
   const pipelineStartTime = performance.now();
   try {
-    const authHeader = req.headers.get('Authorization');
-    
-    // Ingestion Security Check
-    if (config.isProduction && config.ingestSecret) {
-      if (authHeader !== `Bearer ${config.ingestSecret}`) {
-        return NextResponse.json({ error: 'Unauthorized ingestion trigger' }, { status: 401 });
-      }
-    }
+
 
     console.info('[Data Pipeline] Starting ingestion and semantic parsing...');
     const allChunks: ScrapedChunk[] = [];
