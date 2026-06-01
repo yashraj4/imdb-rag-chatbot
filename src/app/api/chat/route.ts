@@ -170,7 +170,8 @@ ${retrievedContext || 'No IMDb list information available.'}`;
           // Stream word by word to emulate active streaming response
           const words = mockAnswer.split(' ');
           for (const word of words) {
-            controller.enqueue(encoder.encode(word + ' '));
+            // Must encode as Vercel AI SDK text protocol (0:"text"\n) for useChat to parse it
+            controller.enqueue(encoder.encode(`0:${JSON.stringify(word + ' ')}\n`));
             await new Promise(resolve => setTimeout(resolve, 30));
           }
           controller.close();
@@ -180,7 +181,7 @@ ${retrievedContext || 'No IMDb list information available.'}`;
       return new Response(customStream, {
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
-          'Transfer-Encoding': 'chunked'
+          'x-vercel-ai-data-stream': 'v1'
         }
       });
     }
