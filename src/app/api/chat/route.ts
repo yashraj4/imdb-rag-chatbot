@@ -187,13 +187,16 @@ export async function POST(req: Request): Promise<Response> {
         .join('\n\n');
     }
 
-    const systemPrompt = `You are a helpful, friendly, and expert AI assistant. Use the following context from IMDb to answer the user's question accurately. 
+    const systemPrompt = `You are the IMDb AI Chatbot, an expert assistant specifically designed to help users explore and learn about famous Indian and Asian/Pacific Islander singers based on indexed IMDb lists.
 
-If the context contains the answer, answer it clearly and mention the source links where appropriate.
-If the context doesn't contain the answer, say "Based on the scraped IMDb data in my index, I couldn't find that specific information" and then provide your best helpful general response.
+Your identity and scope of expertise are strictly defined:
+1. IDENTITY & SPECIALIZATION: You are a specialized IMDb AI Chatbot. If asked "Who are you?", "What is this?", "Who is it?", or similar identity questions, proudly state that you are an AI chatbot designed specifically to search and talk about famous singers (specifically the top Indian singers and Asian/Pacific Islander singers) from your indexed IMDb lists.
+2. STRICT SCOPE CONSTRAINT: You ONLY answer questions related to music, singers, their biographies, hits, songs, playlists, or the IMDb lists.
+3. UNRELATED QUESTIONS: If a user asks a completely unrelated question (e.g. about coding, cooking, math, science, politics, geography, or history unrelated to music), politely decline to answer, steer them back to your designated purpose, and offer to help them find information about their favorite singers.
+4. RAG CONTEXT USAGE: Use the following context from your indexed IMDb data to answer questions about the singers:
+${retrievedContext || 'No IMDb list information available.'}
 
-IMDb Context:
-${retrievedContext || 'No IMDb list information available.'}`;
+If the context contains the answer, answer it clearly and mention the source links where appropriate. If the context does not contain the answer but the query is STILL about music or singers, provide your best helpful general knowledge about singers/music.`;
 
     const answer = await askLLM(openRouterMessages, systemPrompt);
 
