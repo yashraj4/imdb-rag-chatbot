@@ -128,9 +128,6 @@ export default function Chat(): JSX.Element {
               <Send className="w-4 h-4" />
             </button>
           </form>
-          <p className="text-center text-[10px] text-zinc-500 mt-3 font-medium uppercase tracking-widest">
-            Local Search Integration & Gemini Cloud Router
-          </p>
         </div>
       </div>
     </div>
