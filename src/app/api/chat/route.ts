@@ -41,12 +41,76 @@ export async function POST(req: Request): Promise<Response> {
         .join(' ');
     }
 
-    const { hasGemini, hasPinecone } = validateEnvironment();
+    const { hasGemini, hasPinecone, hasRagflow } = validateEnvironment();
+
+    // 1. RAGFLOW ROUTING (IF CONFIGURED)
+    if (hasRagflow && config.ragflowApiKey && config.ragflowChatId) {
+      console.info('[Chat API] Routing query to RAGFlow Engine...');
+      const ragflowUrl = `${config.ragflowBaseUrl}/api/v1/openai/${config.ragflowChatId}/chat/completions`;
+      
+      const response = await fetch(ragflowUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${config.ragflowApiKey}`
+        },
+        body: JSON.stringify({
+          model: 'model',
+          messages: messages.map(m => ({
+            role: m.role,
+            content: m.content
+          })),
+          stream: true
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('[RAGFlow Response Error]', errorText);
+        throw new Error(`RAGFlow API returned status ${response.status}: ${errorText}`);
+      }
+
+      // Convert RAGFlow standard OpenAI stream to Vercel AI SDK text protocol format
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+      
+      const transformStream = new TransformStream({
+        transform(chunk, controller) {
+          const text = decoder.decode(chunk);
+          const lines = text.split('\n');
+          
+          for (const line of lines) {
+            const cleanLine = line.trim();
+            if (!cleanLine || cleanLine === 'data: [DONE]') continue;
+            
+            if (cleanLine.startsWith('data:')) {
+              try {
+                const jsonStr = cleanLine.slice(5).trim();
+                const data = JSON.parse(jsonStr);
+                const content = data.choices?.[0]?.delta?.content || '';
+                if (content) {
+                  controller.enqueue(encoder.encode(`0:${JSON.stringify(content)}\n`));
+                }
+              } catch (e) {
+                // Ignore malformed JSON lines
+              }
+            }
+          }
+        }
+      });
+
+      const responseStream = response.body?.pipeThrough(transformStream);
+      return new Response(responseStream, {
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+        }
+      });
+    }
 
     let retrievedContext = '';
     let dbMatchCount = 0;
 
-    // 1. DUAL-MODE SEMANTIC VECTOR RETRIEVAL
+    // 2. DUAL-MODE SEMANTIC VECTOR RETRIEVAL (Gemini + Pinecone fallback)
     if (hasGemini && hasPinecone && config.pineconeApiKey && config.pineconeIndex) {
       const dbStartTime = performance.now();
       try {
@@ -118,7 +182,7 @@ export async function POST(req: Request): Promise<Response> {
       console.info(`[Local Retrieval] Success: Context prepared in ${localDuration}ms`);
     }
 
-    // 2. CONTEXT-AWARE SYSTEM PROMPT INJECTION
+    // 3. CONTEXT-AWARE SYSTEM PROMPT INJECTION
     const systemPrompt = `You are a helpful, friendly, and expert AI assistant. Use the following context from IMDb to answer the user's question accurately. 
 
 If the context contains the answer, answer it clearly and mention the source links where appropriate.
@@ -127,7 +191,7 @@ If the context doesn't contain the answer, say "Based on the scraped IMDb data i
 IMDb Context:
 ${retrievedContext || 'No IMDb list information available.'}`;
 
-    // 3. DUAL-MODE GENERATION ROUTER (Gemini vs Custom local simulated stream)
+    // 4. DUAL-MODE GENERATION ROUTER (Gemini vs Custom local simulated stream)
     if (hasGemini) {
       console.info('[Chat Generation] Request routed to Cloud Google Gemini-1.5-Flash');
       const result = streamText({
