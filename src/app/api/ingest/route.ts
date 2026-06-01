@@ -3,7 +3,7 @@ import * as cheerio from 'cheerio';
 import fs from 'fs';
 import path from 'path';
 import { Pinecone } from '@pinecone-database/pinecone';
-import { google } from '@ai-sdk/google';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { embedMany } from 'ai';
 import { RecursiveCharacterTextSplitter } from '@/lib/splitter';
 import { config, validateEnvironment } from '@/lib/config';
@@ -108,10 +108,11 @@ export async function POST(req: Request): Promise<Response> {
       const index = pinecone.Index(config.pineconeIndex);
 
       const textsToEmbed = allChunks.map(c => c.text);
+      const googleProvider = createGoogleGenerativeAI({ apiKey: config.geminiApiKey || '' });
       
       // Generating embeddings with Google's text-embedding-004
       const { embeddings } = await embedMany({
-        model: google.embedding('text-embedding-004'),
+        model: googleProvider.embedding('text-embedding-004'),
         values: textsToEmbed,
       });
 

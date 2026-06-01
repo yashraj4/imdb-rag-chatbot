@@ -1,5 +1,5 @@
 import { streamText, embed, ModelMessage } from 'ai';
-import { google } from '@ai-sdk/google';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { config, validateEnvironment } from '@/lib/config';
 import ragDataFallback from '@/rag-data.json';
@@ -65,9 +65,11 @@ export async function POST(req: Request): Promise<Response> {
         const pinecone = new Pinecone({ apiKey: config.pineconeApiKey });
         const index = pinecone.Index(config.pineconeIndex);
 
+        const googleProvider = createGoogleGenerativeAI({ apiKey: config.geminiApiKey || '' });
+        
         // Generate dynamic prompt embedding
         const { embedding } = await embed({
-          model: google.embedding('text-embedding-004'),
+          model: googleProvider.embedding('text-embedding-004'),
           value: lastMessage,
         });
 
@@ -141,8 +143,9 @@ ${retrievedContext || 'No IMDb list information available.'}`;
     // 4. DUAL-MODE GENERATION ROUTER (Gemini vs Custom local simulated stream)
     if (hasGemini) {
       console.info('[Chat Generation] Request routed to Cloud Google Gemini-1.5-Flash');
+      const googleProvider = createGoogleGenerativeAI({ apiKey: config.geminiApiKey || '' });
       const result = streamText({
-        model: google('gemini-1.5-flash'),
+        model: googleProvider('gemini-1.5-flash'),
         messages: [
           { role: 'system', content: systemPrompt },
           ...formattedMessages,
@@ -164,21 +167,13 @@ ${retrievedContext || 'No IMDb list information available.'}`;
         mockAnswer = `[Offline Local RAG Search]\n\nI couldn't find any close matches in the local IMDb scraped data for your question: "${lastMessage}".\n\n*(Note: To activate real Google Gemini 1.5 Flash generation, please add GEMINI_API_KEY to your env settings).*`;
       }
 
-      const encoder = new TextEncoder();
-      const customStream = new ReadableStream({
-        async start(controller) {
-          // Stream word by word to emulate active streaming response
-          const words = mockAnswer.split(' ');
-          for (const word of words) {
-            // Must encode as Vercel AI SDK text protocol (0:"text"\n) for useChat to parse it
-            controller.enqueue(encoder.encode(`0:${JSON.stringify(word + ' ')}\n`));
-            await new Promise(resolve => setTimeout(resolve, 30));
-          }
-          controller.close();
-        }
-      });
+      let responseBody = '';
+      const words = mockAnswer.split(' ');
+      for (const word of words) {
+        responseBody += `0:${JSON.stringify(word + ' ')}\n`;
+      }
 
-      return new Response(customStream, {
+      return new Response(responseBody, {
         headers: {
           'Content-Type': 'text/plain; charset=utf-8',
           'x-vercel-ai-data-stream': 'v1'
